@@ -99,6 +99,13 @@ export const supportedLanguages = [
       return import('@codemirror/lang-cpp').then((module) => module.cpp());
     },
   }),
+  LanguageDescription.of({
+    name: 'Java',
+    extensions: ['java'],
+    async load() {
+      return import('@codemirror/lang-java').then((module) => module.java());
+    },
+  }),
 ];
 
 export async function getLanguage(fileName: string) {

@@ -71,7 +71,7 @@ export default function GitCloneButton({ importChat, className }: GitCloneButton
           // Skip binary files
           if (
             content instanceof Uint8Array &&
-            !filePath.match(/\.(txt|md|astro|mjs|js|jsx|ts|tsx|json|html|css|scss|less|yml|yaml|xml|svg|vue|svelte)$/i)
+            !filePath.match(/\.(txt|md|astro|mjs|js|jsx|ts|tsx|json|html|css|scss|less|yml|yaml|xml|svg|vue|svelte|java|py)$/i)
           ) {
             skippedFiles.push(filePath);
             continue;
@@ -115,25 +115,25 @@ export default function GitCloneButton({ importChat, className }: GitCloneButton
         const filesMessage: Message = {
           role: 'assistant',
           content: `Cloning the repo ${repoUrl} into ${workdir}
-${
-  skippedFiles.length > 0
-    ? `\nSkipped files (${skippedFiles.length}):
-${skippedFiles.map((f) => `- ${f}`).join('\n')}`
-    : ''
-}
+              ${
+                skippedFiles.length > 0
+                  ? `\nSkipped files (${skippedFiles.length}):
+              ${skippedFiles.map((f) => `- ${f}`).join('\n')}`
+                  : ''
+              }
 
-<boltArtifact id="imported-files" title="Git Cloned Files" type="bundled">
-${fileContents
-  .map(
-    (file) =>
-      `<boltAction type="file" filePath="${file.path}">
-${escapeBoltTags(file.content)}
-</boltAction>`,
-  )
-  .join('\n')}
-</boltArtifact>`,
-          id: generateId(),
-          createdAt: new Date(),
+              <boltArtifact id="imported-files" title="Git Cloned Files" type="bundled">
+              ${fileContents
+                .map(
+                  (file) =>
+                    `<boltAction type="file" filePath="${file.path}">
+              ${escapeBoltTags(file.content)}
+              </boltAction>`,
+                )
+                .join('\n')}
+              </boltArtifact>`,
+              id: generateId(),
+              createdAt: new Date()
         };
 
         const messages = [filesMessage];
