@@ -498,12 +498,18 @@ export const Workbench = memo(
           <PushToGitHubDialog
             isOpen={isPushDialogOpen}
             onClose={() => setIsPushDialogOpen(false)}
-            onPush={async (repoName, username, token, isPrivate) => {
+            onPush={async (repoName, username, token, isPrivate, branchName, commitMessage) => {
               try {
-                console.log('Dialog onPush called with isPrivate =', isPrivate);
+                console.log('Dialog onPush called with isPrivate =', isPrivate, 'branchName =', branchName);
 
-                const commitMessage = prompt('Please enter a commit message:', 'Initial commit') || 'Initial commit';
-                const repoUrl = await workbenchStore.pushToGitHub(repoName, commitMessage, username, token, isPrivate);
+                const repoUrl = await workbenchStore.pushToGitHub(
+                  repoName,
+                  commitMessage,
+                  username,
+                  token,
+                  isPrivate,
+                  branchName,
+                );
 
                 if (updateChatMestaData && !metadata?.gitUrl) {
                   updateChatMestaData({

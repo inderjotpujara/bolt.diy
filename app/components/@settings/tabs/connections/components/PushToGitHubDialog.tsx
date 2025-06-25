@@ -1,5 +1,5 @@
 import * as Dialog from '@radix-ui/react-dialog';
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { toast } from 'react-toastify';
 import { motion } from 'framer-motion';
 import { Octokit } from '@octokit/rest';
@@ -9,18 +9,21 @@ import { getLocalStorage } from '~/lib/persistence';
 import { classNames } from '~/utils/classNames';
 import type { GitHubUserResponse } from '~/types/GitHub';
 import { logStore } from '~/lib/stores/logs';
-import { workbenchStore } from '~/lib/stores/workbench';
-import { extractRelativePath } from '~/utils/diff';
-import { formatSize } from '~/utils/formatSize';
-import type { FileMap, File } from '~/lib/stores/files';
 
 // UI Components
-import { Badge, EmptyState, StatusIndicator, SearchInput } from '~/components/ui';
+import { Badge, ConfirmationDialog } from '~/components/ui';
 
 interface PushToGitHubDialogProps {
   isOpen: boolean;
   onClose: () => void;
-  onPush: (repoName: string, username?: string, token?: string, isPrivate?: boolean) => Promise<string>;
+  onPush: (
+    repoName: string,
+    username?: string,
+    token?: string,
+    isPrivate?: boolean,
+    branchName?: string,
+    commitMessage?: string,
+  ) => Promise<string>;
 }
 
 interface GitHubRepo {
@@ -38,16 +41,33 @@ interface GitHubRepo {
 
 export function PushToGitHubDialog({ isOpen, onClose, onPush }: PushToGitHubDialogProps) {
   const [repoName, setRepoName] = useState('');
+  const [branchName, setBranchName] = useState('main');
+  const [branchOptions, setBranchOptions] = useState<string[]>([]);
   const [isPrivate, setIsPrivate] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
   const [user, setUser] = useState<GitHubUserResponse | null>(null);
   const [recentRepos, setRecentRepos] = useState<GitHubRepo[]>([]);
   const [filteredRepos, setFilteredRepos] = useState<GitHubRepo[]>([]);
   const [repoSearchQuery, setRepoSearchQuery] = useState('');
-  const [isFetchingRepos, setIsFetchingRepos] = useState(false);
+  const [isRepoDropdownOpen, setIsRepoDropdownOpen] = useState(false);
+  const [focusedRepoIndex, setFocusedRepoIndex] = useState(-1);
+  const repoOptionsRef = useRef<(HTMLDivElement | null)[]>([]);
+
+  const [branchSearchQuery, setBranchSearchQuery] = useState('');
+  const [isBranchDropdownOpen, setIsBranchDropdownOpen] = useState(false);
+  const [focusedBranchIndex, setFocusedBranchIndex] = useState(-1);
+  const branchOptionsRef = useRef<(HTMLDivElement | null)[]>([]);
+
   const [showSuccessDialog, setShowSuccessDialog] = useState(false);
   const [createdRepoUrl, setCreatedRepoUrl] = useState('');
-  const [pushedFiles, setPushedFiles] = useState<{ path: string; size: number }[]>([]);
+  const [showConfirmDialog, setShowConfirmDialog] = useState(false);
+  const [showCommitDialog, setShowCommitDialog] = useState(false);
+  const [commitMessage, setCommitMessage] = useState('Initial commit');
+  const [confirmDialogMessage, setConfirmDialogMessage] = useState('');
+  const [errorMessage, setErrorMessage] = useState('');
+
+  const repoDropdownRef = useRef<HTMLDivElement>(null);
+  const branchDropdownRef = useRef<HTMLDivElement>(null);
 
   // Load GitHub connection on mount
   useEffect(() => {
@@ -64,6 +84,48 @@ export function PushToGitHubDialog({ isOpen, onClose, onPush }: PushToGitHubDial
       }
     }
   }, [isOpen]);
+
+  // Fetch branches when repoName changes and is non-empty
+  useEffect(() => {
+    async function fetchBranches() {
+      if (!repoName.trim()) {
+        setBranchOptions([]);
+        return;
+      }
+
+      const connection = getLocalStorage('github_connection');
+
+      if (!connection?.token || !connection?.user) {
+        return;
+      }
+
+      try {
+        const response = await fetch(`https://api.github.com/repos/${connection.user.login}/${repoName}/branches`, {
+          headers: {
+            Accept: 'application/vnd.github.v3+json',
+            Authorization: `Bearer ${connection.token}`,
+          },
+        });
+
+        if (!response.ok) {
+          setBranchOptions([]);
+          return;
+        }
+
+        const data = await response.json();
+
+        if (Array.isArray(data)) {
+          setBranchOptions(data.map((b) => b.name));
+        } else {
+          setBranchOptions([]);
+        }
+      } catch {
+        setBranchOptions([]);
+      }
+    }
+
+    fetchBranches();
+  }, [repoName]);
 
   /*
    * Filter repositories based on search query
@@ -101,7 +163,6 @@ export function PushToGitHubDialog({ isOpen, onClose, onPush }: PushToGitHubDial
     }
 
     try {
-      setIsFetchingRepos(true);
       console.log('Fetching GitHub repositories with token:', token.substring(0, 5) + '...');
 
       // Fetch ALL repos by paginating through all pages
@@ -179,23 +240,27 @@ export function PushToGitHubDialog({ isOpen, onClose, onPush }: PushToGitHubDial
       console.error('Exception while fetching GitHub repositories:', error);
       logStore.logError('Failed to fetch GitHub repositories', { error });
       toast.error('Failed to fetch recent repositories');
-    } finally {
-      setIsFetchingRepos(false);
     }
   }, []);
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
+    setErrorMessage('');
 
     const connection = getLocalStorage('github_connection');
 
     if (!connection?.token || !connection?.user) {
-      toast.error('Please connect your GitHub account in Settings > Connections first');
+      setErrorMessage('Please connect your GitHub account in Settings > Connections first');
       return;
     }
 
     if (!repoName.trim()) {
-      toast.error('Repository name is required');
+      setErrorMessage('Repository name is required');
+      return;
+    }
+
+    if (!branchName.trim() || !/^([a-zA-Z0-9._\-/]+)$/.test(branchName)) {
+      setErrorMessage('Please enter a valid branch name.');
       return;
     }
 
@@ -204,59 +269,100 @@ export function PushToGitHubDialog({ isOpen, onClose, onPush }: PushToGitHubDial
     try {
       // Check if repository exists first
       const octokit = new Octokit({ auth: connection.token });
+      let repoExists = false;
+      let branchExists = false;
+      let repoData = null;
 
       try {
-        const { data: existingRepo } = await octokit.repos.get({
+        const { data: repo } = await octokit.repos.get({
           owner: connection.user.login,
           repo: repoName,
         });
+        repoExists = true;
+        repoData = repo;
 
-        // If we get here, the repo exists
-        let confirmMessage = `Repository "${repoName}" already exists. Do you want to update it? This will add or modify files in the repository.`;
+        // Check if branch exists
 
-        // Add visibility change warning if needed
-        if (existingRepo.private !== isPrivate) {
-          const visibilityChange = isPrivate
-            ? 'This will also change the repository from public to private.'
-            : 'This will also change the repository from private to public.';
-
-          confirmMessage += `\n\n${visibilityChange}`;
+        try {
+          await octokit.git.getRef({
+            owner: connection.user.login,
+            repo: repoName,
+            ref: `heads/${branchName.trim()}`,
+          });
+          branchExists = true;
+        } catch (err: any) {
+          if (err.status !== 404) {
+            throw err;
+          }
         }
-
-        const confirmOverwrite = window.confirm(confirmMessage);
-
-        if (!confirmOverwrite) {
-          setIsLoading(false);
-          return;
-        }
-      } catch (error) {
-        // 404 means repo doesn't exist, which is what we want for new repos
-        if (error instanceof Error && 'status' in error && error.status !== 404) {
+      } catch (error: any) {
+        if (error.status !== 404) {
           throw error;
         }
       }
 
-      const repoUrl = await onPush(repoName, connection.user.login, connection.token, isPrivate);
+      // Only show confirm dialog if repo exists and (branch exists or visibility changes)
+      if (repoExists && (branchExists || (repoData && repoData.private !== isPrivate))) {
+        let msg = `You are pushing to branch "${branchName.trim()}" in repo "${repoName}".`;
+
+        if (branchExists) {
+          msg += ' Existing files with the same name will be updated. No files will be deleted.';
+        } else {
+          msg += ' A new branch will be created.';
+        }
+
+        if (repoData && repoData.private !== isPrivate) {
+          msg += isPrivate
+            ? ' This will also change the repository from public to private.'
+            : ' This will also change the repository from private to public.';
+        }
+
+        setConfirmDialogMessage(msg);
+        setShowConfirmDialog(true);
+        setIsLoading(false);
+
+        return;
+      }
+
+      // Otherwise, go straight to commit message dialog
+      setShowCommitDialog(true);
+      setIsLoading(false);
+    } catch (error: any) {
+      setIsLoading(false);
+      setErrorMessage(error.message || 'Failed to check repository.');
+    }
+  }
+
+  // Called after confirmation dialog
+  const handleConfirmProceed = () => {
+    setShowConfirmDialog(false);
+    setShowCommitDialog(true);
+  };
+
+  // Called after commit message dialog
+  const handleCommitProceed = async () => {
+    setShowCommitDialog(false);
+    setIsLoading(true);
+    setErrorMessage('');
+
+    try {
+      const connection = getLocalStorage('github_connection');
+      const repoUrl = await onPush(
+        repoName,
+        connection.user.login,
+        connection.token,
+        isPrivate,
+        branchName,
+        commitMessage,
+      );
       setCreatedRepoUrl(repoUrl);
-
-      // Get list of pushed files
-      const files = workbenchStore.files.get();
-      const filesList = Object.entries(files as FileMap)
-        .filter(([, dirent]) => dirent?.type === 'file' && !dirent.isBinary)
-        .map(([path, dirent]) => ({
-          path: extractRelativePath(path),
-          size: new TextEncoder().encode((dirent as File).content || '').length,
-        }));
-
-      setPushedFiles(filesList);
       setShowSuccessDialog(true);
-    } catch (error) {
-      console.error('Error pushing to GitHub:', error);
-      toast.error('Failed to push to GitHub. Please check your repository name and try again.');
+    } catch (error: any) {
+      setErrorMessage(error.message || 'Failed to push to GitHub.');
     } finally {
       setIsLoading(false);
     }
-  }
+  };
 
   const handleClose = () => {
     setRepoName('');
@@ -265,6 +371,225 @@ export function PushToGitHubDialog({ isOpen, onClose, onPush }: PushToGitHubDial
     setCreatedRepoUrl('');
     onClose();
   };
+
+  // Filtered repo list for dropdown
+  const filteredReposList =
+    repoSearchQuery.trim() === ''
+      ? recentRepos
+      : recentRepos.filter((repo) => repo.name.toLowerCase().includes(repoSearchQuery.toLowerCase()));
+
+  const showCreateNewRepo =
+    repoSearchQuery.trim() &&
+    !recentRepos.some((repo) => repo.name.toLowerCase() === repoSearchQuery.trim().toLowerCase());
+
+  // Keyboard navigation for repo combobox (ModelSelector pattern)
+  const handleRepoKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (!isRepoDropdownOpen) {
+      return;
+    }
+
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      e.stopPropagation();
+      setIsRepoDropdownOpen(false);
+
+      return;
+    }
+
+    if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      setFocusedRepoIndex((prev) => {
+        const max = showCreateNewRepo ? filteredReposList.length : filteredReposList.length - 1;
+        return prev + 1 > max ? 0 : prev + 1;
+      });
+
+      return;
+    }
+
+    if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      setFocusedRepoIndex((prev) => {
+        const max = showCreateNewRepo ? filteredReposList.length : filteredReposList.length - 1;
+        return prev - 1 < 0 ? max : prev - 1;
+      });
+
+      return;
+    }
+
+    if (e.key === 'Enter') {
+      e.preventDefault();
+
+      if (focusedRepoIndex >= 0 && focusedRepoIndex < filteredReposList.length) {
+        setRepoName(filteredReposList[focusedRepoIndex].name);
+        setIsRepoDropdownOpen(false);
+        setRepoSearchQuery('');
+      } else if (showCreateNewRepo && focusedRepoIndex === filteredReposList.length) {
+        setRepoName(repoSearchQuery.trim());
+        setIsRepoDropdownOpen(false);
+        setRepoSearchQuery('');
+      } else if (showCreateNewRepo && filteredReposList.length === 0) {
+        setRepoName(repoSearchQuery.trim());
+        setIsRepoDropdownOpen(false);
+        setRepoSearchQuery('');
+      }
+
+      return;
+    }
+  };
+
+  // Reset focus index when dropdown/query changes
+  useEffect(() => {
+    setFocusedRepoIndex(-1);
+  }, [repoSearchQuery, isRepoDropdownOpen]);
+
+  // Outside click and blur for repo dropdown
+  useEffect(() => {
+    function handleClickOutside(event: MouseEvent) {
+      if (repoDropdownRef.current && !repoDropdownRef.current.contains(event.target as Node)) {
+        setIsRepoDropdownOpen(false);
+      }
+    }
+    document.addEventListener('mousedown', handleClickOutside);
+
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, []);
+
+  // Blur handler for input
+  const handleRepoInputBlur = () => {
+    // If focus is moving to a dropdown item, don't close
+    setTimeout(() => {
+      if (
+        document.activeElement &&
+        repoDropdownRef.current &&
+        repoDropdownRef.current.contains(document.activeElement)
+      ) {
+        return;
+      }
+
+      setIsRepoDropdownOpen(false);
+    }, 0);
+  };
+
+  // Filtered branch list for dropdown
+  const filteredBranchesList =
+    branchSearchQuery.trim() === ''
+      ? branchOptions
+      : branchOptions.filter((b) => b.toLowerCase().includes(branchSearchQuery.toLowerCase()));
+
+  const showCreateNewBranch =
+    branchSearchQuery.trim() && !branchOptions.some((b) => b.toLowerCase() === branchSearchQuery.trim().toLowerCase());
+
+  // Keyboard navigation for branch combobox (ModelSelector pattern)
+  const handleBranchKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (!isBranchDropdownOpen) {
+      return;
+    }
+
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      e.stopPropagation();
+      setIsBranchDropdownOpen(false);
+
+      return;
+    }
+
+    if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      setFocusedBranchIndex((prev) => {
+        const max = showCreateNewBranch ? filteredBranchesList.length : filteredBranchesList.length - 1;
+        return prev + 1 > max ? 0 : prev + 1;
+      });
+
+      return;
+    }
+
+    if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      setFocusedBranchIndex((prev) => {
+        const max = showCreateNewBranch ? filteredBranchesList.length : filteredBranchesList.length - 1;
+        return prev - 1 < 0 ? max : prev - 1;
+      });
+
+      return;
+    }
+
+    if (e.key === 'Enter') {
+      e.preventDefault();
+
+      if (focusedBranchIndex >= 0 && focusedBranchIndex < filteredBranchesList.length) {
+        setBranchName(filteredBranchesList[focusedBranchIndex]);
+        setBranchSearchQuery(filteredBranchesList[focusedBranchIndex]);
+        setIsBranchDropdownOpen(false);
+      } else if (showCreateNewBranch && focusedBranchIndex === filteredBranchesList.length) {
+        setBranchName(branchSearchQuery.trim());
+        setBranchSearchQuery(branchSearchQuery.trim());
+        setIsBranchDropdownOpen(false);
+      } else if (showCreateNewBranch && filteredBranchesList.length === 0) {
+        setBranchName(branchSearchQuery.trim());
+        setBranchSearchQuery(branchSearchQuery.trim());
+        setIsBranchDropdownOpen(false);
+      }
+
+      return;
+    }
+  };
+
+  // Reset focus index when dropdown/query changes
+  useEffect(() => {
+    setFocusedBranchIndex(-1);
+  }, [branchSearchQuery, isBranchDropdownOpen]);
+
+  // Outside click and blur for branch dropdown
+  useEffect(() => {
+    function handleClickOutside(event: MouseEvent) {
+      if (branchDropdownRef.current && !branchDropdownRef.current.contains(event.target as Node)) {
+        setIsBranchDropdownOpen(false);
+      }
+    }
+    document.addEventListener('mousedown', handleClickOutside);
+
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, []);
+
+  const handleBranchInputBlur = () => {
+    setTimeout(() => {
+      if (
+        document.activeElement &&
+        branchDropdownRef.current &&
+        branchDropdownRef.current.contains(document.activeElement)
+      ) {
+        return;
+      }
+
+      setIsBranchDropdownOpen(false);
+    }, 0);
+  };
+
+  const handleBranchKeyDownCapture = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    e.stopPropagation();
+    handleBranchKeyDown(e);
+  };
+
+  // Reset all state on dialog close or open
+  useEffect(() => {
+    if (!isOpen) {
+      setRepoName('');
+      setRepoSearchQuery('');
+      setBranchName('main');
+      setBranchSearchQuery('');
+      setIsRepoDropdownOpen(false);
+      setIsBranchDropdownOpen(false);
+      setFocusedRepoIndex(-1);
+      setFocusedBranchIndex(-1);
+      setErrorMessage('');
+      setShowSuccessDialog(false);
+      setCreatedRepoUrl('');
+      setShowConfirmDialog(false);
+      setShowCommitDialog(false);
+      setCommitMessage('Initial commit');
+      setConfirmDialogMessage('');
+    }
+  }, [isOpen]);
 
   // Success Dialog
   if (showSuccessDialog) {
@@ -339,18 +664,20 @@ export function PushToGitHubDialog({ isOpen, onClose, onPush }: PushToGitHubDial
                   <div className="bg-bolt-elements-background-depth-2 dark:bg-bolt-elements-background-depth-3 rounded-lg p-4 border border-bolt-elements-borderColor dark:border-bolt-elements-borderColor-dark">
                     <p className="text-sm font-medium text-bolt-elements-textPrimary dark:text-bolt-elements-textPrimary-dark mb-2 flex items-center gap-2">
                       <span className="i-ph:files w-4 h-4 text-purple-500" />
-                      Pushed Files ({pushedFiles.length})
+                      Pushed Files ({filteredRepos.length})
                     </p>
                     <div className="max-h-[200px] overflow-y-auto custom-scrollbar pr-2">
-                      {pushedFiles.map((file) => (
+                      {filteredRepos.map((repo) => (
                         <div
-                          key={file.path}
+                          key={repo.full_name}
                           className="flex items-center justify-between py-1.5 text-sm text-bolt-elements-textPrimary dark:text-bolt-elements-textPrimary-dark border-b border-bolt-elements-borderColor/30 dark:border-bolt-elements-borderColor-dark/30 last:border-0"
                         >
-                          <span className="font-mono truncate flex-1 text-xs">{file.path}</span>
-                          <span className="text-xs px-2 py-0.5 rounded-full bg-bolt-elements-background-depth-3 dark:bg-bolt-elements-background-depth-4 text-bolt-elements-textSecondary dark:text-bolt-elements-textSecondary-dark ml-2">
-                            {formatSize(file.size)}
-                          </span>
+                          <span className="font-mono truncate flex-1 text-xs">{repo.name}</span>
+                          {repo.private && (
+                            <Badge variant="primary" size="sm" icon="i-ph:lock w-3 h-3">
+                              Private
+                            </Badge>
+                          )}
                         </div>
                       ))}
                     </div>
@@ -537,7 +864,8 @@ export function PushToGitHubDialog({ isOpen, onClose, onPush }: PushToGitHubDial
                 </div>
 
                 <form onSubmit={handleSubmit} className="space-y-4">
-                  <div className="space-y-2">
+                  {/* Repo Combobox - ModelSelector pattern */}
+                  <div className="space-y-2" ref={repoDropdownRef}>
                     <label
                       htmlFor="repoName"
                       className="text-sm text-bolt-elements-textSecondary dark:text-bolt-elements-textSecondary-dark"
@@ -545,113 +873,176 @@ export function PushToGitHubDialog({ isOpen, onClose, onPush }: PushToGitHubDial
                       Repository Name
                     </label>
                     <div className="relative">
-                      <div className="absolute left-3 top-1/2 -translate-y-1/2 text-bolt-elements-textTertiary dark:text-bolt-elements-textTertiary-dark">
-                        <span className="i-ph:git-branch w-4 h-4" />
-                      </div>
                       <input
                         id="repoName"
                         type="text"
-                        value={repoName}
-                        onChange={(e) => setRepoName(e.target.value)}
-                        placeholder="my-awesome-project"
+                        value={repoSearchQuery}
+                        onChange={(e) => {
+                          setRepoSearchQuery(e.target.value);
+                          setIsRepoDropdownOpen(true);
+
+                          if (e.target.value === '') {
+                            setRepoName('');
+                          }
+                        }}
+                        onFocus={() => setIsRepoDropdownOpen(true)}
+                        onBlur={handleRepoInputBlur}
+                        onKeyDownCapture={handleRepoKeyDown}
+                        placeholder="Select or search repository"
                         className="w-full pl-10 px-4 py-2 rounded-lg bg-bolt-elements-background-depth-2 dark:bg-bolt-elements-background-depth-3 border border-bolt-elements-borderColor dark:border-bolt-elements-borderColor-dark text-bolt-elements-textPrimary dark:text-bolt-elements-textPrimary-dark placeholder-bolt-elements-textTertiary dark:placeholder-bolt-elements-textTertiary-dark focus:outline-none focus:ring-2 focus:ring-purple-500"
                         required
+                        autoComplete="off"
+                        readOnly={false}
                       />
-                    </div>
-                  </div>
-
-                  <div className="space-y-2">
-                    <div className="flex items-center justify-between mb-2">
-                      <label className="text-sm text-bolt-elements-textSecondary dark:text-bolt-elements-textSecondary-dark">
-                        Recent Repositories
-                      </label>
-                      <span className="text-xs text-bolt-elements-textTertiary dark:text-bolt-elements-textTertiary-dark">
-                        {filteredRepos.length} of {recentRepos.length}
-                      </span>
-                    </div>
-
-                    <div className="mb-2">
-                      <SearchInput
-                        placeholder="Search repositories..."
-                        value={repoSearchQuery}
-                        onChange={(e) => setRepoSearchQuery(e.target.value)}
-                        onClear={() => setRepoSearchQuery('')}
-                        className="bg-bolt-elements-background-depth-2 dark:bg-bolt-elements-background-depth-3 border border-bolt-elements-borderColor dark:border-bolt-elements-borderColor-dark text-sm"
-                      />
-                    </div>
-
-                    {recentRepos.length === 0 && !isFetchingRepos ? (
-                      <EmptyState
-                        icon="i-ph:github-logo"
-                        title="No repositories found"
-                        description="We couldn't find any repositories in your GitHub account."
-                        variant="compact"
-                      />
-                    ) : (
-                      <div className="space-y-2 max-h-[200px] overflow-y-auto pr-2 custom-scrollbar">
-                        {filteredRepos.length === 0 && repoSearchQuery.trim() !== '' ? (
-                          <EmptyState
-                            icon="i-ph:magnifying-glass"
-                            title="No matching repositories"
-                            description="Try a different search term"
-                            variant="compact"
-                          />
-                        ) : (
-                          filteredRepos.map((repo) => (
-                            <motion.button
-                              key={repo.full_name}
-                              type="button"
-                              onClick={() => setRepoName(repo.name)}
-                              className="w-full p-3 text-left rounded-lg bg-bolt-elements-background-depth-2 dark:bg-bolt-elements-background-depth-3 hover:bg-bolt-elements-background-depth-3 dark:hover:bg-bolt-elements-background-depth-4 transition-colors group border border-bolt-elements-borderColor dark:border-bolt-elements-borderColor-dark hover:border-purple-500/30"
-                              whileHover={{ scale: 1.01 }}
-                              whileTap={{ scale: 0.99 }}
-                            >
-                              <div className="flex items-center justify-between">
-                                <div className="flex items-center gap-2">
-                                  <div className="i-ph:git-branch w-4 h-4 text-purple-500" />
-                                  <span className="text-sm font-medium text-bolt-elements-textPrimary dark:text-bolt-elements-textPrimary-dark group-hover:text-purple-500">
-                                    {repo.name}
-                                  </span>
-                                </div>
-                                {repo.private && (
-                                  <Badge variant="primary" size="sm" icon="i-ph:lock w-3 h-3">
-                                    Private
-                                  </Badge>
-                                )}
-                              </div>
-                              {repo.description && (
-                                <p className="mt-1 text-xs text-bolt-elements-textSecondary dark:text-bolt-elements-textSecondary-dark line-clamp-2">
-                                  {repo.description}
-                                </p>
-                              )}
-                              <div className="mt-2 flex items-center gap-2 flex-wrap">
-                                {repo.language && (
-                                  <Badge variant="subtle" size="sm" icon="i-ph:code w-3 h-3">
-                                    {repo.language}
-                                  </Badge>
-                                )}
-                                <Badge variant="subtle" size="sm" icon="i-ph:star w-3 h-3">
-                                  {repo.stargazers_count.toLocaleString()}
-                                </Badge>
-                                <Badge variant="subtle" size="sm" icon="i-ph:git-fork w-3 h-3">
-                                  {repo.forks_count.toLocaleString()}
-                                </Badge>
-                                <Badge variant="subtle" size="sm" icon="i-ph:clock w-3 h-3">
-                                  {new Date(repo.updated_at).toLocaleDateString()}
-                                </Badge>
-                              </div>
-                            </motion.button>
-                          ))
-                        )}
+                      <div className="absolute left-3 top-1/2 -translate-y-1/2 text-bolt-elements-textTertiary dark:text-bolt-elements-textTertiary-dark">
+                        <span className="i-ph:git-branch w-4 h-4" />
                       </div>
-                    )}
-                  </div>
-
-                  {isFetchingRepos && (
-                    <div className="flex items-center justify-center py-4">
-                      <StatusIndicator status="loading" pulse={true} label="Loading repositories..." />
+                      {isRepoDropdownOpen && (
+                        <div className="absolute z-20 w-full mt-1 py-1 rounded-lg border border-bolt-elements-borderColor bg-bolt-elements-background-depth-2 shadow-lg max-h-60 overflow-y-auto">
+                          {filteredReposList.length === 0 && !showCreateNewRepo ? (
+                            <div className="px-3 py-2 text-sm text-bolt-elements-textTertiary">
+                              No repositories found.
+                            </div>
+                          ) : (
+                            <>
+                              {filteredReposList.map((repo, idx) => (
+                                <div
+                                  ref={(el) => (repoOptionsRef.current[idx] = el)}
+                                  key={repo.full_name}
+                                  className={classNames(
+                                    'px-3 py-2 text-sm cursor-pointer',
+                                    'hover:bg-bolt-elements-background-depth-3',
+                                    'text-bolt-elements-textPrimary',
+                                    'outline-none',
+                                    repoName === repo.name || focusedRepoIndex === idx
+                                      ? 'bg-bolt-elements-background-depth-2'
+                                      : undefined,
+                                    focusedRepoIndex === idx ? 'ring-1 ring-inset ring-bolt-elements-focus' : undefined,
+                                  )}
+                                  onClick={() => {
+                                    setRepoName(repo.name);
+                                    setRepoSearchQuery(repo.name);
+                                    setIsRepoDropdownOpen(false);
+                                  }}
+                                  tabIndex={focusedRepoIndex === idx ? 0 : -1}
+                                >
+                                  {repo.name}
+                                </div>
+                              ))}
+                              {showCreateNewRepo && (
+                                <div
+                                  className={classNames(
+                                    'px-3 py-2 text-sm text-blue-600 cursor-pointer',
+                                    focusedRepoIndex === filteredReposList.length
+                                      ? 'bg-bolt-elements-background-depth-2 ring-1 ring-inset ring-bolt-elements-focus'
+                                      : undefined,
+                                  )}
+                                  onClick={() => {
+                                    setRepoName(repoSearchQuery.trim());
+                                    setRepoSearchQuery(repoSearchQuery.trim());
+                                    setIsRepoDropdownOpen(false);
+                                  }}
+                                  tabIndex={focusedRepoIndex === filteredReposList.length ? 0 : -1}
+                                >
+                                  Create new repository: <b>{repoSearchQuery.trim()}</b>
+                                </div>
+                              )}
+                            </>
+                          )}
+                        </div>
+                      )}
                     </div>
-                  )}
+                  </div>
+                  {/* Branch Combobox */}
+                  <div className="space-y-2" ref={branchDropdownRef}>
+                    <label
+                      htmlFor="branchName"
+                      className="text-sm text-bolt-elements-textSecondary dark:text-bolt-elements-textSecondary-dark"
+                    >
+                      Branch Name
+                    </label>
+                    <div className="relative">
+                      <input
+                        id="branchName"
+                        type="text"
+                        value={branchSearchQuery}
+                        onChange={(e) => {
+                          setBranchSearchQuery(e.target.value);
+                          setIsBranchDropdownOpen(true);
+
+                          if (e.target.value === '') {
+                            setBranchName('');
+                          }
+                        }}
+                        onFocus={() => setIsBranchDropdownOpen(true)}
+                        onBlur={handleBranchInputBlur}
+                        onKeyDownCapture={handleBranchKeyDownCapture}
+                        placeholder={repoName ? 'Select or create branch' : 'Select a repository first'}
+                        className="w-full pl-10 px-4 py-2 rounded-lg bg-bolt-elements-background-depth-2 dark:bg-bolt-elements-background-depth-3 border border-bolt-elements-borderColor dark:border-bolt-elements-borderColor-dark text-bolt-elements-textPrimary dark:text-bolt-elements-textPrimary-dark placeholder-bolt-elements-textTertiary dark:placeholder-bolt-elements-textTertiary-dark focus:outline-none focus:ring-2 focus:ring-purple-500"
+                        required
+                        autoComplete="off"
+                        readOnly={!repoName}
+                        disabled={!repoName}
+                      />
+                      <div className="absolute left-3 top-1/2 -translate-y-1/2 text-bolt-elements-textTertiary dark:text-bolt-elements-textTertiary-dark">
+                        <span className="i-ph:git-branch w-4 h-4" />
+                      </div>
+                      {isBranchDropdownOpen && repoName && (
+                        <div className="absolute z-20 w-full mt-1 py-1 rounded-lg border border-bolt-elements-borderColor bg-bolt-elements-background-depth-2 shadow-lg max-h-60 overflow-y-auto">
+                          {filteredBranchesList.length === 0 && !showCreateNewBranch ? (
+                            <div className="px-3 py-2 text-sm text-bolt-elements-textTertiary">No branches found.</div>
+                          ) : (
+                            <>
+                              {filteredBranchesList.map((branch, idx) => (
+                                <div
+                                  ref={(el) => (branchOptionsRef.current[idx] = el)}
+                                  key={branch}
+                                  className={classNames(
+                                    'px-3 py-2 text-sm cursor-pointer',
+                                    'hover:bg-bolt-elements-background-depth-3',
+                                    'text-bolt-elements-textPrimary',
+                                    'outline-none',
+                                    branchName === branch || focusedBranchIndex === idx
+                                      ? 'bg-bolt-elements-background-depth-2'
+                                      : undefined,
+                                    focusedBranchIndex === idx
+                                      ? 'ring-1 ring-inset ring-bolt-elements-focus'
+                                      : undefined,
+                                  )}
+                                  onClick={() => {
+                                    setBranchName(branch);
+                                    setBranchSearchQuery(branch);
+                                    setIsBranchDropdownOpen(false);
+                                  }}
+                                  tabIndex={focusedBranchIndex === idx ? 0 : -1}
+                                >
+                                  {branch}
+                                </div>
+                              ))}
+                              {showCreateNewBranch && (
+                                <div
+                                  className={classNames(
+                                    'px-3 py-2 text-sm text-blue-600 cursor-pointer',
+                                    focusedBranchIndex === filteredBranchesList.length
+                                      ? 'bg-bolt-elements-background-depth-2 ring-1 ring-inset ring-bolt-elements-focus'
+                                      : undefined,
+                                  )}
+                                  onClick={() => {
+                                    setBranchName(branchSearchQuery.trim());
+                                    setBranchSearchQuery(branchSearchQuery.trim());
+                                    setIsBranchDropdownOpen(false);
+                                  }}
+                                  tabIndex={focusedBranchIndex === filteredBranchesList.length ? 0 : -1}
+                                >
+                                  Create new branch: <b>{branchSearchQuery.trim()}</b>
+                                </div>
+                              )}
+                            </>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  </div>
                   <div className="p-3 bg-bolt-elements-background-depth-2 dark:bg-bolt-elements-background-depth-3 rounded-lg border border-bolt-elements-borderColor dark:border-bolt-elements-borderColor-dark">
                     <div className="flex items-center gap-2">
                       <input
@@ -672,6 +1063,8 @@ export function PushToGitHubDialog({ isOpen, onClose, onPush }: PushToGitHubDial
                       Private repositories are only visible to you and people you share them with
                     </p>
                   </div>
+
+                  {errorMessage && <div className="text-red-600 text-sm mb-2">{errorMessage}</div>}
 
                   <div className="pt-4 flex gap-2">
                     <motion.button
@@ -712,6 +1105,67 @@ export function PushToGitHubDialog({ isOpen, onClose, onPush }: PushToGitHubDial
           </motion.div>
         </div>
       </Dialog.Portal>
+      {/* Confirmation Dialog */}
+      <ConfirmationDialog
+        isOpen={showConfirmDialog}
+        onClose={() => setShowConfirmDialog(false)}
+        onConfirm={handleConfirmProceed}
+        title="Confirm Push"
+        description={confirmDialogMessage}
+        confirmLabel="Proceed"
+        cancelLabel="Cancel"
+        isLoading={isLoading}
+      />
+      {/* Commit Message Dialog */}
+      <Dialog.Root open={showCommitDialog} onOpenChange={setShowCommitDialog}>
+        <Dialog.Portal>
+          <Dialog.Overlay className="fixed inset-0 bg-black/50 backdrop-blur-sm z-[9999]" />
+          <div className="fixed inset-0 flex items-center justify-center z-[9999]">
+            <motion.div
+              initial={{ opacity: 0, scale: 0.95 }}
+              animate={{ opacity: 1, scale: 1 }}
+              exit={{ opacity: 0, scale: 0.95 }}
+              transition={{ duration: 0.2 }}
+              className="w-[90vw] md:w-[400px]"
+            >
+              <Dialog.Content className="bg-white dark:bg-bolt-elements-background-depth-1 rounded-lg border border-bolt-elements-borderColor dark:border-bolt-elements-borderColor-dark shadow-xl p-6">
+                <h3 className="text-lg font-medium mb-2">Commit Message</h3>
+                <form
+                  onSubmit={(e) => {
+                    e.preventDefault();
+                    handleCommitProceed();
+                  }}
+                >
+                  <input
+                    type="text"
+                    value={commitMessage}
+                    onChange={(e) => setCommitMessage(e.target.value)}
+                    className="w-full px-3 py-2 rounded border border-bolt-elements-borderColor dark:border-bolt-elements-borderColor-dark mb-4"
+                    placeholder="Initial commit"
+                    autoFocus
+                  />
+                  <div className="flex justify-end gap-2">
+                    <button
+                      type="button"
+                      className="px-4 py-2 rounded bg-bolt-elements-background-depth-2 text-bolt-elements-textSecondary border border-bolt-elements-borderColor"
+                      onClick={() => setShowCommitDialog(false)}
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      type="submit"
+                      className="px-4 py-2 rounded bg-purple-500 text-white hover:bg-purple-600"
+                      disabled={isLoading || !commitMessage.trim()}
+                    >
+                      {isLoading ? 'Pushing...' : 'Push'}
+                    </button>
+                  </div>
+                </form>
+              </Dialog.Content>
+            </motion.div>
+          </div>
+        </Dialog.Portal>
+      </Dialog.Root>
     </Dialog.Root>
   );
 }

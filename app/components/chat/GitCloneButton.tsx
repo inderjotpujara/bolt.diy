@@ -34,8 +34,8 @@ const IGNORE_PATTERNS = [
 
 const ig = ignore().add(IGNORE_PATTERNS);
 
-const MAX_FILE_SIZE = 100 * 1024; // 100KB limit per file
-const MAX_TOTAL_SIZE = 500 * 1024; // 500KB total limit
+const MAX_FILE_SIZE = 1024 * 1024; // 1MB limit per file
+const MAX_TOTAL_SIZE = 10 * 1024 * 1024; // 10MB total limit
 
 interface GitCloneButtonProps {
   className?: string;
@@ -71,7 +71,9 @@ export default function GitCloneButton({ importChat, className }: GitCloneButton
           // Skip binary files
           if (
             content instanceof Uint8Array &&
-            !filePath.match(/\.(txt|md|astro|mjs|js|jsx|ts|tsx|json|html|css|scss|less|yml|yaml|xml|svg|vue|svelte)$/i)
+            !filePath.match(
+              /\.(txt|md|astro|mjs|js|jsx|ts|tsx|json|html|css|scss|less|yml|yaml|xml|svg|vue|svelte|java|py|ipynb|properties|gradle|env|toml)$/i,
+            )
           ) {
             skippedFiles.push(filePath);
             continue;

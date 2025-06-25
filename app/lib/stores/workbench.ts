@@ -676,6 +676,7 @@ export class WorkbenchStore {
     githubUsername?: string,
     ghToken?: string,
     isPrivate: boolean = false,
+    branchName?: string,
   ) {
     try {
       // Use cookies if username and token are not provided
@@ -763,6 +764,9 @@ export class WorkbenchStore {
         throw new Error('No files found to push');
       }
 
+      // Get the branch name, default to 'main' if not provided
+      const targetBranch = branchName?.trim() || repo.default_branch || 'main';
+
       // Function to push files with retry logic
       const pushFilesToRepo = async (attempt = 1): Promise<string> => {
         const maxAttempts = 3;
@@ -797,19 +801,44 @@ export class WorkbenchStore {
           const repoRefresh = await octokit.repos.get({ owner, repo: repoName });
           repo = repoRefresh.data;
 
-          // Get the latest commit SHA (assuming main branch, update dynamically if needed)
-          const { data: ref } = await octokit.git.getRef({
-            owner: repo.owner.login,
-            repo: repo.name,
-            ref: `heads/${repo.default_branch || 'main'}`, // Handle dynamic branch
-          });
-          const latestCommitSha = ref.object.sha;
+          // Check if the branch exists
+          let branchSha: string;
+
+          try {
+            const { data: ref } = await octokit.git.getRef({
+              owner: repo.owner.login,
+              repo: repo.name,
+              ref: `heads/${targetBranch}`,
+            });
+            branchSha = ref.object.sha;
+          } catch (err: any) {
+            // If not found, create the branch from default branch
+            if (err.status === 404) {
+              // Get the default branch SHA
+              const { data: defaultRef } = await octokit.git.getRef({
+                owner: repo.owner.login,
+                repo: repo.name,
+                ref: `heads/${repo.default_branch || 'main'}`,
+              });
+              branchSha = defaultRef.object.sha;
+
+              // Create the new branch
+              await octokit.git.createRef({
+                owner: repo.owner.login,
+                repo: repo.name,
+                ref: `refs/heads/${targetBranch}`,
+                sha: branchSha,
+              });
+            } else {
+              throw err;
+            }
+          }
 
           // Create a new tree
           const { data: newTree } = await octokit.git.createTree({
             owner: repo.owner.login,
             repo: repo.name,
-            base_tree: latestCommitSha,
+            base_tree: branchSha,
             tree: validBlobs.map((blob) => ({
               path: blob!.path,
               mode: '100644',
@@ -824,18 +853,18 @@ export class WorkbenchStore {
             repo: repo.name,
             message: commitMessage || 'Initial commit from your app',
             tree: newTree.sha,
-            parents: [latestCommitSha],
+            parents: [branchSha],
           });
 
           // Update the reference
           await octokit.git.updateRef({
             owner: repo.owner.login,
             repo: repo.name,
-            ref: `heads/${repo.default_branch || 'main'}`, // Handle dynamic branch
+            ref: `heads/${targetBranch}`,
             sha: newCommit.sha,
           });
 
-          console.log('Files successfully pushed to repository');
+          console.log(`Files successfully pushed to repository on branch ${targetBranch}`);
 
           return repo.html_url;
         } catch (error) {
