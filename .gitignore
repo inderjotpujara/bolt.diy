@@ -11,6 +11,11 @@ dist
 dist-ssr
 *.local
 
+# Lock files
+package-lock.json
+pnpm-lock.yaml
+.env.example
+
 .vscode/*
 .vscode/launch.json
 !.vscode/extensions.json

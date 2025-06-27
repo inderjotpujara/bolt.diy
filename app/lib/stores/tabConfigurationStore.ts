@@ -5,7 +5,6 @@ export interface TabConfig {
   visible: boolean;
   window: 'developer' | 'user';
   order: number;
-  locked?: boolean;
 }
 
 interface TabConfigurationStore {

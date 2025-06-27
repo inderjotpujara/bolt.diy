@@ -92,7 +92,7 @@ export function FileIcon({ filename, size = 'md', className }: FileIconProps) {
     }
 
     if (['env', 'env.local', 'env.development', 'env.production'].includes(extension)) {
-      return 'i-ph:file-lock';
+      return 'i-ph:file-text';
     }
 
     // Document files

@@ -24,7 +24,6 @@ import { DEFAULT_TERMINAL_SIZE, TerminalTabs } from './terminal/TerminalTabs';
 import { workbenchStore } from '~/lib/stores/workbench';
 import { Search } from './Search'; // <-- Ensure Search is imported
 import { classNames } from '~/utils/classNames'; // <-- Import classNames if not already present
-import { LockManager } from './LockManager'; // <-- Import LockManager
 
 interface EditorPanelProps {
   files?: FileMap;
@@ -106,14 +105,6 @@ export const EditorPanel = memo(
                         >
                           Search
                         </Tabs.Trigger>
-                        <Tabs.Trigger
-                          value="locks"
-                          className={classNames(
-                            'h-full bg-transparent hover:bg-bolt-elements-background-depth-3 py-0.5 px-2 rounded-lg text-sm font-medium text-bolt-elements-textTertiary hover:text-bolt-elements-textPrimary data-[state=active]:text-bolt-elements-textPrimary',
-                          )}
-                        >
-                          Locks
-                        </Tabs.Trigger>
                       </Tabs.List>
                     </div>
                   </PanelHeader>
@@ -133,10 +124,6 @@ export const EditorPanel = memo(
 
                   <Tabs.Content value="search" className="flex-grow overflow-auto focus-visible:outline-none">
                     <Search />
-                  </Tabs.Content>
-
-                  <Tabs.Content value="locks" className="flex-grow overflow-auto focus-visible:outline-none">
-                    <LockManager />
                   </Tabs.Content>
                 </Tabs.Root>
               </div>

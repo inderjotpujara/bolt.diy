@@ -21,7 +21,7 @@ import type { Theme } from '~/types/theme';
 import { classNames } from '~/utils/classNames';
 import { debounce } from '~/utils/debounce';
 import { createScopedLogger, renderLogger } from '~/utils/logger';
-import { isFileLocked, getCurrentChatId } from '~/utils/fileLocks';
+
 import { BinaryContent } from './BinaryContent';
 import { getTheme, reconfigureTheme } from './cm-theme';
 import { indentKeyBinding } from './indent';
@@ -298,16 +298,6 @@ export const CodeMirrorEditor = memo(
         autoFocusOnDocumentChange,
         doc as TextEditorDocument,
       );
-
-      // Check if the file is locked and update the editor state accordingly
-      const currentChatId = getCurrentChatId();
-      const { locked } = isFileLocked(doc.filePath, currentChatId);
-
-      if (locked) {
-        view.dispatch({
-          effects: [editableStateEffect.of(false)],
-        });
-      }
     }, [doc?.value, editable, doc?.filePath, autoFocusOnDocumentChange]);
 
     return (
@@ -449,13 +439,9 @@ function setEditorDocument(
     });
   }
 
-  // Check if the file is locked
-  const currentChatId = getCurrentChatId();
-  const { locked } = isFileLocked(doc.filePath, currentChatId);
-
-  // Set editable state based on both the editable prop and the file's lock state
+  // Set editable state based on the editable prop and whether it's binary
   view.dispatch({
-    effects: [editableStateEffect.of(editable && !doc.isBinary && !locked)],
+    effects: [editableStateEffect.of(editable && !doc.isBinary)],
   });
 
   getLanguage(doc.filePath).then((languageSupport) => {
@@ -525,19 +511,7 @@ function getReadOnlyTooltip(state: EditorState) {
     return [];
   }
 
-  // Get the current document from the module-level reference
-  const currentDoc = currentDocRef;
-  let tooltipMessage = 'Cannot edit file while AI response is being generated';
-
-  // If we have a current document, check if it's locked
-  if (currentDoc?.filePath) {
-    const currentChatId = getCurrentChatId();
-    const { locked } = isFileLocked(currentDoc.filePath, currentChatId);
-
-    if (locked) {
-      tooltipMessage = 'This file is locked and cannot be edited';
-    }
-  }
+  const tooltipMessage = 'Cannot edit file while AI response is being generated';
 
   return state.selection.ranges
     .filter((range) => {
